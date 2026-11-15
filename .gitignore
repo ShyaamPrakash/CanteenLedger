@@ -1,0 +1,10 @@
+# Executable produced by the README build command
+/canteenledger
+/canteenledger.exe
+
+# Runtime ledger and temporary save file, in any data directory
+ledger.log
+ledger.log.tmp
+
+# Python test cache
+__pycache__/
