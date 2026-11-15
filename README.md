@@ -157,6 +157,3 @@ or concurrent-writer lock. The operator supplies today's date. Parent-directory
 sync is absent, and power-loss recovery has not been verified. Keep backups of
 important data.
 
-Old students.txt, menu.txt and preorders.txt files are not imported automatically.
-The program uses its versioned ledger.log format.
-
