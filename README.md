@@ -160,31 +160,3 @@ important data.
 Old students.txt, menu.txt and preorders.txt files are not imported automatically.
 The program uses its versioned ledger.log format.
 
-## Checks
-
-After compiling, run the interface tests if you have Python installed:
-
-```powershell
-python tests/test_interfaces.py -v
-```
-
-The tests use temporary folders and cover menu operations, commands, invalid
-input, EOF, confirmations, recovery and reopening data in the other mode.
-They leave the sample data alone.
-
-To try the sample commands yourself, use a fresh folder:
-
-```powershell
-New-Item -ItemType Directory smoke-data
-Get-Content .\data\sample\workflow.txt | .\canteenledger.exe --data smoke-data
-.\canteenledger.exe --menu --data smoke-data
-```
-
-The sample leaves student 1 with a balance of 900, today's remaining stock at 8,
-and tomorrow's stock at 5 with 3 reserved. Run it only once per fresh folder.
-
-The Windows GCC build completed without warnings. Runtime tests were attempted,
-but Windows Application Control blocked the executable (error 4551), including
-when retried outside the sandbox. The runtime tests have not passed in this
-environment. Power-loss recovery and disk or memory failure checks are also
-unverified.
