@@ -1,159 +1,123 @@
 # CanteenLedger
 
-CanteenLedger is a terminal program for managing a canteen's students, wallet
-balances, menu and stock. It records immediate purchases and future preorders,
-with cancellation, refunds and fulfilment.
+CanteenLedger is a C program for managing a canteen's students, wallets, menu and
+daily stock. You can place purchases and preorders, process refunds, and view
+orders and transaction history from the terminal.
 
-Amounts are whole integer currency units. Dates use YYYY-MM-DD. Names can contain
-up to 63 bytes; use underscores between words.
+Everything is saved locally in `canteen.db` using SQLite. The program creates
+the database on first use and loads your saved records when you open it again.
 
 ## Build and run
 
-You need GCC with C11 support. Open PowerShell in the project folder and compile:
+You need GCC with C11 support and the SQLite development library. On Windows,
+install SQLite from an MSYS2 UCRT64 terminal:
+
+```sh
+pacman -S --needed mingw-w64-ucrt-x86_64-sqlite3
+```
+
+Open PowerShell in the project folder, then compile and run:
 
 ```powershell
-gcc -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow canteen_cli.c canteen_menu.c canteen_ledger.c -o canteenledger.exe
+gcc -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow main.c ledger.c -l:libsqlite3.a -o canteenledger.exe
+.\canteenledger.exe
 ```
 
-Create a folder for your data, then start the program:
+The Windows build includes SQLite in the executable. On Linux, install GCC and
+the SQLite development package, then use:
+
+```sh
+gcc -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow main.c ledger.c -lsqlite3 -o canteenledger
+./canteenledger
+```
+
+## Using the program
+
+Running the program in a terminal opens the numbered menu. Choose a section
+and follow the prompts. Enter `0` to go back or exit from the main menu.
+Orders show their total before you confirm them.
+
+You can also select an interface yourself:
 
 ```powershell
-New-Item -ItemType Directory -Force my-data
-.\canteenledger.exe --data my-data
+.\canteenledger.exe --menu
+.\canteenledger.exe --cli
 ```
 
-The data directory must already exist. Without --data, the program uses the
-current directory. Each successful change is saved automatically.
+Piped input automatically uses command mode. Both interfaces work with the same
+database and save each successful change as you go.
 
-## Interface Modes
-
-### Interactive Menu
-
-```powershell
-.\canteenledger.exe --menu --data my-data
-```
-
-Choose a number and follow the prompts:
-
-```text
-==================================================
-CANTEENLEDGER
-Canteen Management System
-==================================================
-1. Student Management
-2. Menu Management
-3. Inventory Management
-4. Place Immediate Order
-5. Preorder Management
-6. Wallet Management
-7. Reports
-8. Transaction History
-9. Save Data
-0. Exit
-Enter your choice:
-```
-
-Submenus use 0 to go back. Orders show a total before asking for confirmation.
-Spaces in names are saved as underscores to match the command format. Reports
-accept status names such as CONFIRMED, FULFILLED and CANCELLED.
-
-### Command Mode
-
-```powershell
-.\canteenledger.exe --cli --data my-data
-```
-
-Enter one command per line. For example:
-
-```text
-> student 101 500 Shyaam
-OK
-> topup 101 100
-OK
-> report 101 0 * *
-student 101 Shyaam balance=600
-> exit
-```
-
-### Automatic Mode Selection
-
-Terminal input opens the menu by default. Piped or redirected input uses command
-mode. The --menu and --cli flags override this choice; using both is an error.
-Use --help for launch options. Choose 0 from the main menu, type exit in command
-mode, or send EOF to leave. EOF during a prompt abandons the unfinished action.
-
-Both modes read and save the same ledger.log in the selected data folder.
+Dates use `YYYY-MM-DD`, and amounts are whole currency units. Names can contain
+up to 63 bytes. Use underscores between words in command mode; the numbered
+menu converts spaces for you.
 
 ## Commands
 
-    student ID BALANCE NAME
-    topup STUDENT AMOUNT
-    item ID PRICE ACTIVE NAME
-    stock ITEM YYYY-MM-DD QUANTITY
-    order STUDENT ITEM QUANTITY TODAY TARGET
-    cancel ORDER TODAY
-    fulfil ORDER TODAY
-    report STUDENT ITEM DATE STATUS
-    history
-    save
-    help
-    exit
+```text
+student ID BALANCE NAME
+topup STUDENT AMOUNT
+item ID PRICE ACTIVE NAME
+stock ITEM YYYY-MM-DD QUANTITY
+order STUDENT ITEM QUANTITY TODAY TARGET
+cancel ORDER TODAY
+fulfil ORDER TODAY
+report STUDENT ITEM DATE STATUS
+history
+save
+help
+exit
+```
 
-student adds a student; duplicate IDs are rejected. topup adds a positive amount.
-item creates a menu item or changes its name, price and active status. Set ACTIVE
-to 1 to allow orders or 0 to stop new orders.
+`student` creates a student wallet, and `topup` adds money to it. `item` adds or
+updates a menu item; set `ACTIVE` to `1` to allow orders or `0` to stop them.
+`stock` sets the remaining quantity for an item on a particular date.
 
-stock sets the remaining stock for one item and date. It cannot go below the
-quantity already reserved. Missing stock for a future date causes an order to fail.
+Orders for today are fulfilled immediately. Future orders charge the wallet
+and reserve stock for the target date. Each order keeps the price it was placed
+at, even when the menu price changes later.
 
-An order with the same TODAY and TARGET dates is fulfilled immediately. A future
-order charges the wallet and reserves stock for its target date. Prices are
-captured when the order is placed, so later menu changes do not change its total.
+Cancelling a confirmed preorder refunds its original charge and releases the
+reserved stock. Fulfil a preorder on or after its target date. Overdue preorders
+stay reserved until you process them.
 
-You can cancel a confirmed preorder until it is fulfilled, even if it is overdue.
-Cancellation releases its reservation and refunds its original charge once.
-Fulfilment is allowed on or after the target date and consumes the reservation
-once. Overdue orders stay reserved until you process them. If a refund would
-overflow the wallet balance, cancellation fails without changing the order.
+For `report`, use `0` for all students or items and `*` for all dates or statuses.
+Status values are `0` for confirmed, `1` for fulfilled and `2` for cancelled.
+Reports show orders, wallet balances and stock availability. `history` shows
+saved transactions, and `save` flushes the database cache.
 
-For report, use 0 for all students or items, and * for all dates or statuses.
-Status values are 0 for CONFIRMED, 1 for FULFILLED and 2 for CANCELLED.
-Student, item, date and status filters apply together to order rows. Catalog rows
-filter their own IDs; inventory totals filter by item and date.
+Here is a short command session for a fresh database:
 
-Reports show remaining stock, reservations, availability and fulfilled quantities.
-The planned total is remaining stock plus fulfilled quantities for the current
-plan. Accepted orders cannot exceed stock, so the reported shortage is zero.
-history displays the transaction log with its sequence IDs.
+```text
+student 1 1000 Ada
+item 7 20 1 Rice
+stock 7 2026-11-18 10
+stock 7 2026-11-19 5
+order 1 7 2 2026-11-18 2026-11-18
+order 1 7 3 2026-11-18 2026-11-19
+report 0 0 * *
+history
+save
+exit
+```
 
-## Files
+## Where the data goes
 
-The main files are:
+By default, `canteen.db` is created in the directory you run the program from.
+To choose another location, create a folder and pass it with `--data`:
 
-- canteen_cli.c selects the interface and handles text commands and history.
-- canteen_menu.c handles numbered menus and guided input.
-- canteen_menu.h declares the menu and shared history display.
-- canteen_ledger.c contains validation, wallet and order rules, inventory, hash lookup
-  and file storage.
-- ledger.h declares the records and ledger functions.
-- hash_table.h declares the hash index.
+```powershell
+New-Item -ItemType Directory -Force my-data | Out-Null
+.\canteenledger.exe --data my-data
+```
 
-## Storage and limits
+The database stores students, menu items, inventory, orders and transaction
+history. SQL values use bound parameters, and each change is saved in a single
+transaction. Close the program before copying `canteen.db` for a backup.
 
-The program stores a versioned ledger.log in the chosen data directory. Each
-change records its command, checksum, sequence ID and commit marker.
-It checks writes, flushes the file and requests an OS sync before updating the
-live in-memory state.
+## Project files
 
-Startup reads committed commands into a fresh ledger. An incomplete final record
-is removed; a malformed complete record causes an error. A failed append can leave
-its disk outcome uncertain, so the program exits and requires a restart.
-
-save writes the full log to a temporary file and replaces the old log atomically.
-It keeps the full history and does not reduce the log's size.
-
-Run one instance per data directory. The program has no authentication, encryption
-or concurrent-writer lock. The operator supplies today's date. Parent-directory
-sync is absent, and power-loss recovery has not been verified. Keep backups of
-important data.
-
+| File | Purpose |
+| --- | --- |
+| `main.c` | Numbered menus, prompts and text commands |
+| `ledger.c` | Wallet and order rules, stock management and SQLite storage |
+| `ledger.h` | Shared records and function declarations |

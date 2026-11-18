@@ -4,6 +4,8 @@
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+#include <sqlite3.h>
+#include <stdarg.h>
 void *grow(void *records, size_t *capacity, size_t count, size_t width)
 {
     if(width == 0 || count == SIZE_MAX)
@@ -290,28 +292,6 @@ int hash_put(Hash *h,int key,size_t value)
     h->buckets[j]=p;
     h->count++;
     return 1;
-}
-
-int hash_remove(Hash *h,int key)
-{
-    if(!h->capacity)
-    {
-        return 0;
-    }
-    Node **p=&h->buckets[bucket(key,h->capacity)];
-    while(*p)
-    {
-        if((*p)->key==key)
-        {
-            Node *q=*p;
-            *p=q->next;
-            free(q);
-            h->count--;
-            return 1;
-        }
-        p=&(*p)->next;
-    }
-    return 0;
 }
 
 Status addstudent(Ledger *ledger,int id,const char *name,int balance)
@@ -676,315 +656,200 @@ Status applycommand(Ledger *ledger,const char *command)
     }
     return INVALID;
 }
-#ifdef _WIN32
-#include <io.h>
-#include <windows.h>
-#define SYNC(f) _commit(_fileno(f))
-#else
-#include <unistd.h>
-#define SYNC(f) fsync(fileno(f))
-#endif
-static uint32_t checksum(const char *p)
+
+
+static int execute(sqlite3 *db, const char *sql)
 {
-    uint32_t h=UINT32_C(2166136261);
-    while(*p)
-    {
-        h^=(unsigned char)*p++;
-        h*=UINT32_C(16777619);
-    }
-    return h;
+    int result = sqlite3_exec(db, sql, NULL, NULL, NULL);
+    if(result != SQLITE_OK)
+        fprintf(stderr, "SQLite: %s\n", sqlite3_errstr(result));
+    return result == SQLITE_OK;
 }
 
-static int durable_close(FILE *f)
+/* Bind i=int, s=string and u=sequence; values never become SQL syntax. */
+static int statement(sqlite3 *db, const char *sql, const char *types, ...)
 {
-    int bad=fflush(f)!=0;
-    if(!bad && SYNC(f)!=0)
+    sqlite3_stmt *stmt = NULL;
+    int result = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if(result != SQLITE_OK) goto done;
+    va_list args;
+    va_start(args, types);
+    for(int i = 0; types[i] && result == SQLITE_OK; i++)
     {
-        bad=1;
+        if(types[i] == 'i')
+            result = sqlite3_bind_int(stmt, i + 1, va_arg(args, int));
+        else if(types[i] == 'u')
+            result = sqlite3_bind_int64(stmt, i + 1, (sqlite3_int64)va_arg(args, uint64_t));
+        else
+            result = sqlite3_bind_text(stmt, i + 1, va_arg(args, const char *), -1, SQLITE_TRANSIENT);
     }
-    if(fclose(f)!=0)
-    {
-        bad=1;
-    }
-    return !bad;
-}
-
-static int truncate_at(FILE *f,long end)
-{
-    if(fflush(f)!=0)
-    {
-        return 0;
-    }
-#ifdef _WIN32
-    return _chsize_s(_fileno(f),(long long)end)==0 && SYNC(f)==0;
-#else
-    return ftruncate(fileno(f),(off_t)end)==0 && SYNC(f)==0;
-#endif
-}
-
-Status storage_open(Storage *s,Ledger *ledger,const char *directory)
-{
-    *s=(Storage){0};
-    if(snprintf(s->path,sizeof(s->path),"%s/ledger.log",directory)>=(int)sizeof(s->path))
-    {
-        return INVALID;
-    }
-    FILE *f=fopen(s->path,"r+b");
-    if(!f)
-    {
-        if(errno!=ENOENT)
-        {
-            return IO_ERROR;
-        }
-        f=fopen(s->path,"wb");
-        if(!f)
-        {
-            return IO_ERROR;
-        }
-        if(fputs("CanteenLedger 1\n",f)==EOF)
-        {
-            fclose(f);
-            return IO_ERROR;
-        }
-        if(!durable_close(f))
-        {
-            return IO_ERROR;
-        }
-        freeledger(ledger);
-        return OK;
-    }
-    Ledger temp = {0};
-    char line[LINE_SIZE+80],commit[80];
-    long good=0;
-    Status result=CORRUPT;
-    if(readline(f,line,sizeof(line))!=1 || strcmp(line,"CanteenLedger 1"))
-    {
-        goto done;
-    }
-    good=ftell(f);
-    if(good<0)
-    {
-        result=IO_ERROR;
-        goto done;
-    }
-    for(;;)
-    {
-        int r=readline(f,line,sizeof(line));
-        if(r==0)
-        {
-            result=OK;
-            break;
-        }
-        if(r<0 || r==2)
-        {
-            if(ferror(f))
-            {
-                result=IO_ERROR;
-                goto done;
-            }
-            if(!feof(f))
-            {
-                goto done;
-            }
-            if(!truncate_at(f,good))
-            {
-                result=IO_ERROR;
-                goto done;
-            }
-            result=OK;
-            break;
-        }
-        r=readline(f,commit,sizeof(commit));
-        if(r!=1)
-        {
-            if(ferror(f))
-            {
-                result=IO_ERROR;
-                goto done;
-            }
-            if(!feof(f))
-            {
-                goto done;
-            }
-            if(!truncate_at(f,good))
-            {
-                result=IO_ERROR;
-                goto done;
-            }
-            result=OK;
-            break;
-        }
-        char *first=strchr(line,' '), *second=first?strchr(first+1,' '):NULL;
-        if(!first || !second || !second[1])
-        {
-            goto done;
-        }
-        *first=0;
-        *second=0;
-        for(char *p=line;*p;p++)
-        {
-            if(*p<'0'||*p>'9')
-            {
-                goto done;
-            }
-        }
-        if(!*line || strlen(first+1)!=8)
-        {
-            goto done;
-        }
-        for(char *p=first+1;*p;p++)
-        {
-            if(!((*p>='0'&&*p<='9')||(*p>='a'&&*p<='f')))
-            {
-                goto done;
-            }
-        }
-        errno=0;
-        char *end;
-        unsigned long seq=strtoul(line,&end,10);
-        if(errno || *end || s->sequence==ULONG_MAX || seq!=s->sequence+1)
-        {
-            goto done;
-        }
-        errno=0;
-        unsigned long hash=strtoul(first+1,&end,16);
-        if(errno || *end || hash>UINT32_MAX || checksum(second+1)!=(uint32_t)hash)
-        {
-            goto done;
-        }
-        char expected[80];
-        snprintf(expected,sizeof(expected),"COMMIT %lu",seq);
-        if(strcmp(expected,commit))
-        {
-            goto done;
-        }
-        Status replaystatus = applycommand(&temp, second + 1);
-        if(replaystatus != OK)
-        {
-            result = replaystatus == MEMORY ? MEMORY : CORRUPT;
-            goto done;
-        }
-        s->sequence=seq;
-        good=ftell(f);
-        if(good<0)
-        {
-            result=IO_ERROR;
-            goto done;
-        }
-    }
+    va_end(args);
+    if(result == SQLITE_OK) result = sqlite3_step(stmt);
 done:
-    if(fclose(f)!=0)
-    {
-        result=IO_ERROR;
-    }
-    if(result==OK)
-    {
-        freeledger(ledger);
-        *ledger=temp;
-    }
-    else
-    {
-        freeledger(&temp);
-    }
-    return result;
+    if(result != SQLITE_DONE)
+        fprintf(stderr, "SQLite: %s\n", sqlite3_errstr(result));
+    int closed = sqlite3_finalize(stmt);
+    return result == SQLITE_DONE && closed == SQLITE_OK;
 }
 
-/* Publish the candidate only after the journal write has been synced. */
-Status storage_commit(Storage *s,Ledger *ledger,const char *command)
+void storage_close(Storage *s)
 {
-    if(s->poisoned)
+    if(s->database) sqlite3_close(s->database);
+    s->database = NULL;
+}
+
+Status storage_open(Storage *s, Ledger *ledger, const char *directory)
+{
+    *s = (Storage){0};
+    char path[1024];
+    int length = snprintf(path, sizeof(path), "%s/canteen.db", directory);
+    if(length < 0 || (size_t)length >= sizeof(path)) return INVALID;
+    sqlite3 *db = NULL;
+    if(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) != SQLITE_OK)
     {
+        if(db) sqlite3_close(db);
         return IO_ERROR;
     }
-    if(s->sequence==ULONG_MAX)
+    s->database = db;
+    sqlite3_busy_timeout(db, 3000);
+    if(!execute(db, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; BEGIN IMMEDIATE;"
+        "CREATE TABLE IF NOT EXISTS students(id INTEGER PRIMARY KEY,name TEXT NOT NULL,balance INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY,name TEXT NOT NULL,price INTEGER NOT NULL,active INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS inventory(item INTEGER NOT NULL,target_date TEXT NOT NULL,stock INTEGER NOT NULL,reserved INTEGER NOT NULL,PRIMARY KEY(item,target_date));"
+        "CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY,student INTEGER NOT NULL,item INTEGER NOT NULL,quantity INTEGER NOT NULL,unit_price INTEGER NOT NULL,total INTEGER NOT NULL,placed TEXT NOT NULL,target_date TEXT NOT NULL,state INTEGER NOT NULL);"
+        "CREATE TABLE IF NOT EXISTS transactions(sequence INTEGER PRIMARY KEY,command TEXT NOT NULL); COMMIT;"))
     {
-        return OVERFLOW;
+        storage_close(s);
+        return IO_ERROR;
+    }
+    sqlite3_stmt *rows = NULL;
+    if(sqlite3_prepare_v2(db, "SELECT sequence,command FROM transactions ORDER BY sequence", -1, &rows, NULL) != SQLITE_OK)
+    {
+        storage_close(s);
+        return IO_ERROR;
     }
     Ledger candidate = {0};
-    Status st=copyledger(ledger,&candidate);
-    if(st!=OK)
+    Status status = OK;
+    int result;
+    while((result = sqlite3_step(rows)) == SQLITE_ROW)
     {
-        return st;
+        sqlite3_int64 sequence = sqlite3_column_int64(rows, 0);
+        const char *command = (const char *)sqlite3_column_text(rows, 1);
+        int bytes = sqlite3_column_bytes(rows, 1);
+        if(!command || bytes <= 0 || bytes >= LINE_SIZE || strlen(command) != (size_t)bytes ||
+           sequence <= 0 || s->sequence >= INT64_MAX ||
+           (uint64_t)sequence != s->sequence + 1)
+        {
+            status = CORRUPT;
+            break;
+        }
+        status = applycommand(&candidate, command);
+        if(status != OK)
+        {
+            if(status != MEMORY) status = CORRUPT;
+            break;
+        }
+        s->sequence = (uint64_t)sequence;
     }
-    st=applycommand(&candidate,command);
-    if(st!=OK)
+    if(status == OK && result != SQLITE_DONE) status = IO_ERROR;
+    if(sqlite3_finalize(rows) != SQLITE_OK && status == OK) status = IO_ERROR;
+    if(status == OK)
+    {
+        freeledger(ledger);
+        *ledger = candidate;
+        return OK;
+    }
+    freeledger(&candidate);
+    storage_close(s);
+    return status;
+}
+
+static int saverecords(sqlite3 *db, const Ledger *ledger)
+{
+    /* shortcut: sync all records per command; update changed rows for large datasets. */
+    for(size_t i = 0; i < ledger->studentcount; i++)
+    {
+        const Student *s = &ledger->students[i];
+        if(!statement(db, "INSERT INTO students VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,balance=excluded.balance",
+                      "isi", s->id, s->name, s->balance)) return 0;
+    }
+    for(size_t i = 0; i < ledger->menucount; i++)
+    {
+        const Item *m = &ledger->items[i];
+        if(!statement(db, "INSERT INTO items VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,price=excluded.price,active=excluded.active",
+                      "isii", m->id, m->name, m->price, m->active)) return 0;
+    }
+    for(size_t i = 0; i < ledger->inventorycount; i++)
+    {
+        const Inventory *v = &ledger->inventory[i];
+        if(!statement(db, "INSERT INTO inventory VALUES (?,?,?,?) ON CONFLICT(item,target_date) DO UPDATE SET stock=excluded.stock,reserved=excluded.reserved",
+                      "isii", v->item, v->date, v->stock, v->reserved)) return 0;
+    }
+    for(size_t i = 0; i < ledger->ordercount; i++)
+    {
+        const Order *o = &ledger->orders[i];
+        if(!statement(db, "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state",
+                      "iiiiiissi", o->id, o->student, o->item, o->quantity, o->unit_price, o->total,
+                      o->placed, o->date, (int)o->state)) return 0;
+    }
+    return 1;
+}
+
+Status storage_commit(Storage *s, Ledger *ledger, const char *command)
+{
+    if(s->poisoned || !s->database) return IO_ERROR;
+    if(s->sequence >= INT64_MAX) return OVERFLOW;
+    Ledger candidate = {0};
+    Status status = copyledger(ledger, &candidate);
+    if(status != OK) return status;
+    status = applycommand(&candidate, command);
+    if(status != OK)
     {
         freeledger(&candidate);
-        return st;
+        return status;
     }
-    FILE *f=fopen(s->path,"ab");
-    if(!f)
+    sqlite3 *db = s->database;
+    if(!execute(db, "BEGIN IMMEDIATE")) goto failed;
+    /* A duplicate sequence also rejects writes from a stale second instance. */
+    if(!saverecords(db, &candidate) ||
+       !statement(db, "INSERT INTO transactions VALUES (?,?)", "us", s->sequence + 1, command) ||
+       !execute(db, "COMMIT"))
     {
-        freeledger(&candidate);
-        return IO_ERROR;
-    }
-    unsigned long seq=s->sequence+1;
-    int bad=fprintf(f,"%lu %08x %s\nCOMMIT %lu\n",seq,(unsigned)checksum(command),command,seq)<0;
-    if(!durable_close(f))
-    {
-        bad=1;
-    }
-    if(bad)
-    {
-        s->poisoned=1;
-        freeledger(&candidate);
-        return IO_ERROR;
+        execute(db, "ROLLBACK");
+        goto failed;
     }
     freeledger(ledger);
-    *ledger=candidate;
-    s->sequence=seq;
+    *ledger = candidate;
+    s->sequence++;
     return OK;
+failed:
+    s->poisoned = 1;
+    freeledger(&candidate);
+    return IO_ERROR;
 }
 
 Status storage_checkpoint(Storage *s)
 {
-    if(s->poisoned)
+    if(s->poisoned || !s->database) return IO_ERROR;
+    if(sqlite3_db_cacheflush(s->database) != SQLITE_OK)
     {
+        s->poisoned = 1;
         return IO_ERROR;
     }
-    char path[1100];
-    snprintf(path,sizeof(path),"%s.tmp",s->path);
-    FILE *in=fopen(s->path,"rb");
-    if(!in)
+    return OK;
+}
+
+void storage_history(const Storage *s)
+{
+    sqlite3_stmt *rows = NULL;
+    if(sqlite3_prepare_v2(s->database, "SELECT sequence,command FROM transactions ORDER BY sequence", -1, &rows, NULL) != SQLITE_OK)
     {
-        return IO_ERROR;
+        puts("I/O error");
+        return;
     }
-    FILE *out=fopen(path,"wb");
-    if(!out)
-    {
-        fclose(in);
-        return IO_ERROR;
-    }
-    char buf[4096];
-    size_t n;
-    int bad=0;
-    while((n = fread(buf, 1, sizeof(buf), in)) != 0)
-    {
-        if(fwrite(buf, 1, n, out) != n)
-        {
-            bad = 1;
-            break;
-        }
-    }
-    if(ferror(in))
-    {
-        bad=1;
-    }
-    if(fclose(in)!=0)
-    {
-        bad=1;
-    }
-    if(!durable_close(out))
-    {
-        bad=1;
-    }
-    if(bad)
-    {
-        return IO_ERROR;
-    }
-#ifdef _WIN32
-    return MoveFileExA(path,s->path,MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)?OK:IO_ERROR;
-#else
-    return rename(path,s->path)==0?OK:IO_ERROR;
-#endif
+    int result;
+    while((result = sqlite3_step(rows)) == SQLITE_ROW)
+        printf("%lld %s\n", (long long)sqlite3_column_int64(rows, 0), sqlite3_column_text(rows, 1));
+    if(result != SQLITE_DONE) puts("I/O error");
+    sqlite3_finalize(rows);
 }

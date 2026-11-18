@@ -1,9 +1,24 @@
 #ifndef LEDGER_H
 #define LEDGER_H
-#include "hash_table.h"
+#include <stddef.h>
 #include <stdio.h>
 #include <stdint.h>
 #define LINE_SIZE 512
+/* Index entries keep array positions valid when record arrays grow. */
+typedef struct Node
+{
+    int key;
+    size_t value;
+    struct Node *next;
+} Node;
+typedef struct
+{
+    Node **buckets;
+    size_t capacity, count;
+} Hash;
+void hash_free(Hash *h);
+int hash_put(Hash *h,int key,size_t value);
+int hash_find(const Hash *h,int key,size_t *value);
 typedef enum
 {
     OK, INVALID, DUPLICATE, MISSING, FUNDS, STOCK, OVERFLOW, MEMORY, IO_ERROR, CORRUPT, TRANSITION
@@ -69,11 +84,13 @@ void report(const Ledger *ledger,FILE *f,int student,int item,const char *date,i
 void reportorders(const Ledger *ledger,FILE *f,int student,int item,const char *date,int state,int preorders);
 typedef struct
 {
-    char path[1024];
-    unsigned long sequence;
+    uint64_t sequence;
     int poisoned;
+    void *database;
 } Storage;
 Status storage_open(Storage *s,Ledger *ledger,const char *directory);
+void storage_history(const Storage *s);
 Status storage_commit(Storage *s,Ledger *ledger,const char *command);
 Status storage_checkpoint(Storage *s);
+void storage_close(Storage *s);
 #endif

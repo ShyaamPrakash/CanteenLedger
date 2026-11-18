@@ -1,10 +1,16 @@
-# Executable produced by the README build command
+# Build outputs
 /canteenledger
 /canteenledger.exe
 
-# Runtime ledger and temporary save file, in any data directory
+# Local database files and SQLite sidecar files
+canteen.db
+canteen.db-journal
+canteen.db-wal
+canteen.db-shm
+
+# Saved data from the earlier log-based version
 ledger.log
 ledger.log.tmp
 
-# Python test cache
-__pycache__/
+# Local credentials from the earlier MySQL setup
+.env
